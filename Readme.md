@@ -333,6 +333,207 @@ on your behalf.
 
 ---
 
+## Creating a self-signed certificate (for HTTPS)
+
+Everything above runs over plain HTTP. To serve HTTPS instead, nginx needs two
+files:
+
+- a **private key** — a secret number, kept on the server and never shared
+- a **certificate** — a public file that wraps your key's public half together
+  with your identity ("this is localhost"), plus a signature vouching for it
+
+Normally a **Certificate Authority** (a company like Let's Encrypt) signs that
+certificate, and browsers trust it because they already trust the CA. For local
+learning there's no CA involved — you sign it yourself. That's what
+**self-signed** means.
+
+### Step 1 — Make a directory to keep them in
+
+```bash
+sudo mkdir -p /etc/nginx/ssl
+cd /etc/nginx/ssl
+```
+
+**Why here, and not inside this repo?** The private key is a secret. This
+project's `.gitignore` only ignores `node_modules/`, so a key file saved in the
+project folder would be picked up by the next `git add .` and committed —
+possibly pushed to GitHub. Putting it in `/etc/nginx/ssl` keeps it out of git's
+reach completely, and sits it right next to the config that reads it.
+
+If you ever do keep keys inside a project, add this to `.gitignore` first:
+
+```gitignore
+*.key
+*.crt
+*.pem
+```
+
+### Step 2 — Run the command
+
+Open a terminal and paste this:
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout nginx-selfsigned.key \
+  -out nginx-selfsigned.crt
+```
+
+The `\` at the end of a line means "this command continues on the next line" —
+it's only there for readability. As a single line:
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout nginx-selfsigned.key -out nginx-selfsigned.crt
+```
+
+`sudo` is needed because `/etc/nginx/ssl` is owned by root. Watch the spelling
+of the output filenames — `nginx`, not `nginxx`. OpenSSL will happily create a
+file with a typo'd name, and then nginx won't find it later.
+
+### Step 3 — What each part means
+
+| Part | What it does |
+| --- | --- |
+| `openssl` | The tool itself. A general-purpose toolbox for keys, certificates, and encryption. |
+| `req` | The sub-command for certificate requests. Normally it produces a *request* to send to a CA — `-x509` below changes that. |
+| `-x509` | Skip the request and output a finished, **self-signed certificate** instead. X.509 is the standard format all TLS certificates use. Without this flag you'd get a `.csr` request file that isn't usable on its own. |
+| `-nodes` | **No** **D**ES — don't put a passphrase on the private key. Important for a server: with a passphrase, nginx would stop and ask you to type it every single time it starts, so it could never boot unattended. In OpenSSL 3 this is also spelled `-noenc`; `-nodes` still works. |
+| `-days 365` | How long the certificate is valid — one year from today. After that browsers and `curl` report it as expired and you generate a new one. |
+| `-newkey rsa:2048` | Create a brand-new private key at the same time, using RSA at 2048 bits. Without this you'd have to make the key separately first. 2048 is the sensible minimum; 4096 is slower but stronger. |
+| `-keyout nginx-selfsigned.key` | Where to write the **private key**. Keep secret. |
+| `-out nginx-selfsigned.crt` | Where to write the **certificate**. This one is public — it's sent to every visitor. |
+
+The `.key` / `.crt` extensions are just naming convention. OpenSSL doesn't care;
+pick names you'll recognise later.
+
+### Step 4 — The questions it asks
+
+After you press Enter, OpenSSL asks for identity details. Every one is optional
+except the last:
+
+```
+Country Name (2 letter code) [AU]:BD
+State or Province Name (full name) [Some-State]:Dhaka
+Locality Name (eg, city) []:Dhaka
+Organization Name (eg, company) [Internet Widgits Pty Ltd]:Learning
+Organizational Unit Name (eg, section) []:
+Common Name (e.g. server FQDN or YOUR name) []:localhost
+Email Address []:
+```
+
+**Common Name is the one that matters.** It's the hostname the certificate
+claims to be for, and it must match the address you type in the browser. Since
+you're testing on `localhost`, enter `localhost`. Press Enter to skip any of the
+others.
+
+To skip the questions entirely, pass the answers on the command line with
+`-subj`:
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout nginx-selfsigned.key \
+  -out nginx-selfsigned.crt \
+  -subj "/C=BD/ST=Dhaka/L=Dhaka/O=Learning/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+```
+
+That `-addext` line is worth knowing about: modern browsers **ignore Common
+Name** and read the *Subject Alternative Name* field instead. A certificate with
+only a CN will fail in Chrome with `ERR_CERT_COMMON_NAME_INVALID` even when the
+name is correct. `curl` is more forgiving, which is why a cert can look fine in
+the terminal and still be rejected by the browser.
+
+### Step 5 — What you end up with
+
+```bash
+ls -l /etc/nginx/ssl
+```
+
+| File | Contains | Share it? |
+| --- | --- | --- |
+| `nginx-selfsigned.key` | The private key | **Never.** Anyone holding this can impersonate your server. |
+| `nginx-selfsigned.crt` | The certificate | Yes — it's handed to every visitor automatically. |
+
+Lock the key down so only root can read it:
+
+```bash
+sudo chmod 600 /etc/nginx/ssl/nginx-selfsigned.key
+```
+
+Check what you actually generated:
+
+```bash
+openssl x509 -in /etc/nginx/ssl/nginx-selfsigned.crt -noout -subject -dates
+```
+
+That prints the Common Name you entered and the valid-from / valid-until dates —
+a quick way to confirm the file is what you think it is.
+
+### Step 6 — Wiring it into nginx
+
+Two directives point nginx at the files, and `listen` gains the `ssl` keyword:
+
+```nginx
+server {
+    listen 8443 ssl;
+    server_name localhost;
+
+    ssl_certificate     /etc/nginx/ssl/nginx-selfsigned.crt;
+    ssl_certificate_key /etc/nginx/ssl/nginx-selfsigned.key;
+
+    location / {
+        proxy_pass http://nodejs_cluster;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Add this as a **second** `server` block inside `http` — keep the existing port
+8080 one so you can compare HTTP and HTTPS side by side.
+
+Notes on the above:
+
+- `8443` is the conventional "unofficial HTTPS" port, pairing with `8080` for
+  HTTP. The real standard is `443`; either works here.
+- `ssl_certificate` takes the **`.crt`**, `ssl_certificate_key` takes the
+  **`.key`**. Swapping them is a common mistake and produces a confusing
+  `PEM_read_bio_X509` error at startup.
+- `X-Forwarded-Proto $scheme` is newly important now. TLS stops at nginx, so the
+  app only ever sees plain HTTP. Without this header it can't tell the visitor
+  arrived over HTTPS, and any redirect it builds will drop back to `http://`.
+
+Then test and reload:
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+
+curl -k https://localhost:8443
+```
+
+The `-k` tells curl to skip certificate verification. Without it you'll get
+`self-signed certificate` and no output — which is curl working correctly, not a
+broken setup.
+
+### Step 7 — Why the browser shows a warning
+
+Open `https://localhost:8443` and you'll get **"Your connection is not private"**
+or **"Warning: Potential Security Risk Ahead"**.
+
+This is expected and not a mistake. The browser is saying: *the encryption is
+fine, but nobody I trust vouched for who this server claims to be.* It has a
+list of trusted Certificate Authorities built in, and you aren't on it.
+
+Click **Advanced → Proceed to localhost** to continue. The traffic is genuinely
+encrypted; the only thing missing is third-party verification of identity.
+
+For a real domain you'd replace this certificate with a free one from **Let's
+Encrypt** (via `certbot`), which browsers trust automatically. Self-signed
+certificates are for local development only.
+
+---
+
 ## Useful commands
 
 ```bash
