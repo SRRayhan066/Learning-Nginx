@@ -1,0 +1,1 @@
+# This is for nginx.conf setup
