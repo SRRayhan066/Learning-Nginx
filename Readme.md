@@ -474,17 +474,17 @@ Two directives point nginx at the files, and `listen` gains the `ssl` keyword:
 
 ```nginx
 server {
-    listen 8443 ssl;
+    listen 443 ssl;
     server_name localhost;
 
-    ssl_certificate     /etc/nginx/ssl/nginx-selfsigned.crt;
-    ssl_certificate_key /etc/nginx/ssl/nginx-selfsigned.key;
+    ssl_certificate /path/to/your/certs/nginx-selfsigned.crt;
+    ssl_certificate_key /path/to/your/certs/nginx-selfsigned.key;
+
 
     location / {
         proxy_pass http://nodejs_cluster;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
